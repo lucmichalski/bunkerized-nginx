@@ -65,6 +65,8 @@ crond
 
 # start nginx
 echo "[*] Running nginx ..."
+chown -Rf nginx:nginx /var/log/
+chmod -Rf 755 /var/log/nginx
 su -s "/usr/sbin/nginx" nginx
 
 # start fail2ban
