@@ -22,6 +22,9 @@ if [ "$MULTISITE" = "yes" ] ; then
 	ROOT_FOLDER="${ROOT_FOLDER}/$1"
 fi
 
+# generate Let's Encrypt certificate before copying configs
+# in case we are in autoconf mode and nginx is already running
+
 # copy stub confs
 if [ "$MULTISITE" = "yes" ] ; then
 	mkdir "$NGINX_PREFIX"
@@ -53,9 +56,16 @@ if [ "$USE_REVERSE_PROXY" = "yes" ] ; then
 			value=$(echo "$var" | sed "s/${name}=//")
 			host=$(echo "$name" | sed "s/URL/HOST/")
 			host_value=$(env | grep "^${host}=" | sed "s/${host}=//")
+			ws=$(echo "$name" | sed "s/URL/WS/")
+			ws_value=$(env | grep "^${ws}=" | sed "s/${ws}=//")
 			cp "${NGINX_PREFIX}reverse-proxy.conf" "${NGINX_PREFIX}reverse-proxy-${i}.conf"
 			replace_in_file "${NGINX_PREFIX}reverse-proxy-${i}.conf" "%REVERSE_PROXY_URL%" "$value"
 			replace_in_file "${NGINX_PREFIX}reverse-proxy-${i}.conf" "%REVERSE_PROXY_HOST%" "$host_value"
+			if [ "$ws_value" = "yes" ] ; then
+				replace_in_file "${NGINX_PREFIX}reverse-proxy-${i}.conf" "%REVERSE_PROXY_WS%" "proxy_http_version 1.1;\nproxy_set_header Upgrade \$http_upgrade;\nproxy_set_header Connection \"Upgrade\";\n"
+			else
+				replace_in_file "${NGINX_PREFIX}reverse-proxy-${i}.conf" "%REVERSE_PROXY_WS%" ""
+			fi
 			i=$(($i + 1))
 		fi
 	done
@@ -131,7 +141,7 @@ if [ "$REMOTE_PHP" != "" ] ; then
 	replace_in_file "${NGINX_PREFIX}server.conf" "%FASTCGI_PATH%" "include ${NGINX_PREFIX}fastcgi.conf;"
 	replace_in_file "${NGINX_PREFIX}php.conf" "%REMOTE_PHP%" "$REMOTE_PHP"
 	if [ "$MULTISITE" = "yes" ] ; then
-		cp /etc/nginx/fastcgi.conf ${NGINX_PREFIX}fastcgi.conf
+		cp /etc/nginx/fastcgi.conf ${NGINX_PREFIX}fastcgi.conf && chown root:nginx ${NGINX_PREFIX}fastcgi.conf
 	fi
 	replace_in_file "${NGINX_PREFIX}fastcgi.conf" "\$document_root" "${REMOTE_PHP_PATH}/"
 else
@@ -228,14 +238,10 @@ else
 fi
 
 # disable default server
-if [ "$DISABLE_DEFAULT_SERVER" = "yes" ] ; then
+if [ "$DISABLE_DEFAULT_SERVER" = "yes" ] && [ "$MULTISITE" != "yes" ] ; then
 	replace_in_file "${NGINX_PREFIX}server.conf" "%DISABLE_DEFAULT_SERVER%" "include ${NGINX_PREFIX}disable-default-server.conf;"
-	if [ "$MULTISITE" == "yes" ] ; then
-		replace_in_file "${NGINX_PREFIX}disable-default-server.conf" "%SERVER_NAME%" "$1"
-	else
-		SERVER_NAME_PIPE=$(echo $SERVER_NAME | sed "s/ /|/g")
-		replace_in_file "${NGINX_PREFIX}disable-default-server.conf" "%SERVER_NAME%" "$SERVER_NAME_PIPE"
-	fi
+	SERVER_NAME_PIPE=$(echo $SERVER_NAME | sed "s/ /|/g")
+	replace_in_file "${NGINX_PREFIX}disable-default-server.conf" "%SERVER_NAME%" "$SERVER_NAME_PIPE"
 else
 	replace_in_file "${NGINX_PREFIX}server.conf" "%DISABLE_DEFAULT_SERVER%" ""
 fi
@@ -259,9 +265,16 @@ fi
 
 # block bad UA
 if [ "$BLOCK_USER_AGENT" = "yes" ] ; then
-	replace_in_file "${NGINX_PREFIX}server.conf" "%BLOCK_USER_AGENT%" "include ${NGINX_PREFIX}block-user-agent.conf;"
+	replace_in_file "${NGINX_PREFIX}main-lua.conf" "%USE_USER_AGENT%" "true"
 else
-	replace_in_file "${NGINX_PREFIX}server.conf" "%BLOCK_USER_AGENT%" ""
+	replace_in_file "${NGINX_PREFIX}main-lua.conf" "%USE_USER_AGENT%" "false"
+fi
+
+# block bad referrer
+if [ "$BLOCK_REFERRER" = "yes" ] ; then
+	replace_in_file "${NGINX_PREFIX}main-lua.conf" "%USE_REFERRER%" "true"
+else
+	replace_in_file "${NGINX_PREFIX}main-lua.conf" "%USE_REFERRER%" "false"
 fi
 
 # block TOR exit nodes
@@ -308,15 +321,27 @@ if [ "$AUTO_LETS_ENCRYPT" = "yes" ] || [ "$USE_CUSTOM_HTTPS" = "yes" ] || [ "$GE
 		replace_in_file "${NGINX_PREFIX}https.conf" "%STRICT_TRANSPORT_SECURITY%" ""
 	fi
 	if [ "$AUTO_LETS_ENCRYPT" = "yes" ] ; then
-		FIRST_SERVER_NAME=$(echo "$SERVER_NAME" | cut -d " " -f 1)
+		if [ "$MULTISITE" = "no" ] ; then
+			FIRST_SERVER_NAME=$(echo "$SERVER_NAME" | cut -d " " -f 1)
+		else
+			FIRST_SERVER_NAME="$1"
+			if [ ! -f /etc/letsencrypt/live/${1}/fullchain.pem ] ; then
+				echo "[*] Performing Let's Encrypt challenge for $1 ..."
+				EMAIL_LETS_ENCRYPT="${EMAIL_LETS_ENCRYPT-contact@$1}"
+				/opt/scripts/certbot-new.sh "$1" "$EMAIL_LETS_ENCRYPT"
+			fi
+		fi
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_CERT%" "/etc/letsencrypt/live/${FIRST_SERVER_NAME}/fullchain.pem"
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_KEY%" "/etc/letsencrypt/live/${FIRST_SERVER_NAME}/privkey.pem"
+		replace_in_file "${NGINX_PREFIX}https.conf" "%LETS_ENCRYPT_WEBROOT%" "include ${NGINX_PREFIX}lets-encrypt-webroot.conf;"
 	elif [ "$USE_CUSTOM_HTTPS" = "yes" ] ; then
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_CERT%" "$CUSTOM_HTTPS_CERT"
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_KEY%" "$CUSTOM_HTTPS_KEY"
+		replace_in_file "${NGINX_PREFIX}https.conf" "%LETS_ENCRYPT_WEBROOT%" ""
 	elif [ "$GENERATE_SELF_SIGNED_SSL" = "yes" ] ; then
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_CERT%" "/etc/nginx/self-signed-ssl/cert.pem"
 		replace_in_file "${NGINX_PREFIX}https.conf" "%HTTPS_KEY%" "/etc/nginx/self-signed-ssl/key.pem"
+		replace_in_file "${NGINX_PREFIX}https.conf" "%LETS_ENCRYPT_WEBROOT%" ""
 	fi
 else
 	replace_in_file "${NGINX_PREFIX}server.conf" "%USE_HTTPS%" ""
@@ -517,8 +542,7 @@ fi
 
 # fail2ban
 if [ "$USE_FAIL2BAN" = "yes" ] ; then
-	echo "" > ${NGINX_PREFIX}fail2ban-ip.conf
-	replace_in_file "${NGINX_PREFIX}server.conf" "%USE_FAIL2BAN%" "include ${NGINX_PREFIX}fail2ban-ip.conf;"
+	replace_in_file "${NGINX_PREFIX}server.conf" "%USE_FAIL2BAN%" "include /etc/nginx/fail2ban-ip.conf;"
 else
 	replace_in_file "${NGINX_PREFIX}server.conf" "%USE_FAIL2BAN%" ""
 fi

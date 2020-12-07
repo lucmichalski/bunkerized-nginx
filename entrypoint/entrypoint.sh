@@ -64,15 +64,22 @@ rsyslogd
 crond
 
 # start nginx
+if [ -f "/tmp/nginx.pid" ] ; then
+	nginx -s quit
+fi
 echo "[*] Running nginx ..."
 chown -Rf nginx:nginx /var/log/
 chmod -Rf 755 /var/log/nginx
 su -s "/usr/sbin/nginx" nginx
 
+# list of log files to display
+LOGS="/var/log/access.log /var/log/error.log"
+
 # start fail2ban
 if [ "$USE_FAIL2BAN" = "yes" ] ; then
 	echo "[*] Running fail2ban ..."
 	fail2ban-server > /dev/null
+	LOGS="$LOGS /var/log/fail2ban.log"
 fi
 
 # start crowdsec
@@ -92,11 +99,15 @@ if [ "$1" == "test" ] ; then
 	exit 1
 fi
 
-# display logs
-LOGS="/var/log/access.log /var/log/error.log"
-if [ "$USE_FAIL2BAN" = "yes" ] ; then
-	LOGS="$LOGS /var/log/fail2ban.log"
+# start the autoconf manager
+if [ -S "/var/run/docker.sock" ] ; then
+	echo "[*] Running autoconf ..."
+	touch /var/log/autoconf.log
+	/opt/autoconf/autoconf.py > /var/log/autoconf.log 2>&1 &
+	LOGS="$LOGS /var/log/autoconf.log"
 fi
+
+# display logs
 tail -F $LOGS &
 wait $!
 
